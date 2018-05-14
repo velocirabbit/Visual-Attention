@@ -32,10 +32,107 @@ independent linear layers, followed by a ReLU activation and another linear
 layer that combines the information from both components. The GlimpseNetwork
 defines a trainable bandwidth-limited sensor for the attention network producing
 the glimpse representation.
+
+Inputs:
+`image_size`: the size of the input image as an `int`. For now, assumes the
+        image is square.
+`in_channels`: number of channels in the input images (typically 1 for
+    grayscale, 3 for RGB, 4 for RGBa)
+`glimpse_h_size`: size of the hidden layer for the independent glimpse linear
+    layer representation
+`loc_h_size`: size of the hidden layer for the independent location linear
+    layer representation (for each dimension!)
+`h_size`: size of the hidden layer for the combined glimpse/location linear
+    layer representation
+`glimpse_sizes`: a list of either `int`s or `float`s representing the
+    (square) size of each glimpse to extract from the input image. The sizes
+    should be in increasing order, but this will still make sure they're
+    ordered correctly. The length of `glimpse_sizes` will also be the number
+    of glimpse patches to extract. If `glimpse_sizes` is a list of `int`s,
+    they'll be treated as exact sizes; if it's a list of `float`s, they'll
+    be treated as percentages of `image_size`, and should thus all be <= 1.
+    Padding will be added to the inputs to allow glimpses near the edges.
+    The actual sizes of the resulting glimpses will be the same size as the
+    first glimpse.
+`pad_imgs`: whether or not the input images need padding applied. Defaults
+    to `True`, but set to `False` if the input images already have padding
+    applied; make sure it's of the correct size!
+`learn_kernels`: if `True`, the kernels used to create the glimpses will
+    have learnable parameters. If `False` (the default), the glimpses will
+    be created using bicubic interpolation, and the kernels used will have
+    fixed weights
+`a`: the scaling factor used for bicubic interpolation during resizing
+`preserve_out_channels`: if `True`, the number of out channels is kept in
+    each of the glimpses. If `False` (default), the number of out channels
+    in the glimpses is 1
 '''
 class GlimpseNetwork(nn.Module):
-    def __init__(self):
+    def __init__(self, image_size, in_channels,
+                glimpse_h_size, loc_h_size, h_size,
+                glimpse_sizes = [0.05, 0.1, 0.3, 0.6],
+                pad_imgs = True, learn_kernels = False, a = -0.5,
+                preserve_out_channels = False):
         super(GlimpseNetwork, self).__init__()
+        self.image_size = image_size
+        self.in_channels = in_channels
+        self.out_channels = in_channels if preserve_out_channels else 1
+        self.glimpse_h_size = glimpse_h_size
+        self.loc_h_size = loc_h_size
+        self.h_size = h_size
+        # Initialize the GlimpseSensor
+        self.glimpse_sensor = GlimpseSensor(
+            image_size = image_size, in_channels = in_channels, a = a,
+            glimpse_sizes = glimpse_sizes, learn_kernels = learn_kernels,
+            preserve_out_channels = preserve_out_channels, pad_imgs = pad_imgs
+        )
+
+        # Initialize the network
+        self.glimpse_layer = nn.Linear(
+            self.glimpse_sensor.unrolled_glimpse_size, glimpse_h_size
+        )
+        self.loc_embeds = nn.ModuleList([
+            nn.Embedding(image_size, loc_h_size),
+            nn.Embedding(image_size, loc_h_size)
+        ])
+        self.h_layer = nn.Linear(glimpse_h_size + 2*loc_h_size, h_size)
+
+        # Initialize weights
+        self.init()
+
+    def init(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform(p)
+            else:
+                p.data.fill_(0)
+
+    def forward(self, imgs, locs):
+        nbatches = imgs.size(0)
+        # Get glimpse representations for the images
+        glimpses = self.glimpse_sensor(imgs, locs)                              # (nbatches, out_channels, gH, gW)
+        # Embed the glimpse locations
+        x_loc = Variable(                                                       # (nbatches, 1)
+            torch.LongTensor([loc[0] for loc in locs]).unsqueeze(1)
+        )
+        y_loc = Variable(                                                       # (nbatches, 1)
+            torch.LongTensor([loc[1] for loc in locs]).unsqueeze(1)
+        )
+
+        x_embeds = self.loc_embeds[0](x_loc)                                    # (nbatches, loc_h_size)
+        y_embeds = self.loc_embeds[1](y_loc)                                    # (nbatches, loc_h_size)
+
+        # Concatenate
+        loc_embed = torch.cat([x_embeds, y_embeds], -1)                         # (nbatches, 2*loc_h_size)
+        # Pass through final linear layer
+        glimpse_net = self.h_layer(                                             # (nbatches, h_size)
+            # (nbatches, unrolled_glimpse_size + 2*loc_h_size)
+            torch.cat([
+                glimpses.view(nbatches, -1), loc_embed
+            ], -1)
+        )
+
+        return glimpse_net
+        
 
 '''
 Given the coordinates of the glimpse and an input image, the GlimpseSensor
@@ -47,6 +144,8 @@ class GlimpseSensor(nn.Module):
     Inputs:
     `image_size`: the size of the input image as an `int`. For now, assumes the
         image is square.
+    `in_channels`: number of channels in the input images (typically 1 for
+        grayscale, 3 for RGB, 4 for RGBa)
     `glimpse_sizes`: a list of either `int`s or `float`s representing the
         (square) size of each glimpse to extract from the input image. The sizes
         should be in increasing order, but this will still make sure they're
@@ -57,21 +156,28 @@ class GlimpseSensor(nn.Module):
         Padding will be added to the inputs to allow glimpses near the edges.
         The actual sizes of the resulting glimpses will be the same size as the
         first glimpse.
+    `pad_imgs`: whether or not the input images need padding applied. Defaults
+        to `True`, but set to `False` if the input images already have padding
+        applied; make sure it's of the correct size!
     `learn_kernels`: if `True`, the kernels used to create the glimpses will
         have learnable parameters. If `False` (the default), the glimpses will
         be created using bicubic interpolation, and the kernels used will have
         fixed weights
-    `a`: the scaling factor used for bicubic interpolation during resizing.
+    `a`: the scaling factor used for bicubic interpolation during resizing
+    `preserve_out_channels`: if `True`, the number of out channels is kept in
+        each of the glimpses. If `False` (default), the number of out channels
+        in the glimpses is 1
     '''
     def __init__(self, image_size, in_channels,
                 glimpse_sizes = [0.05, 0.1, 0.3, 0.6],
-                learn_kernels = False, a = -0.5, preserve_out_channels = False
-                ):
+                pad_imgs = True, learn_kernels = False, a = -0.5,
+                preserve_out_channels = False):
         super(GlimpseSensor, self).__init__()
         glimpse_sizes.sort()
 
         self.image_size = image_size
         self.in_channels = in_channels
+        self.out_channels = in_channels if preserve_out_channels else 1
         self.num_glimpses = len(glimpse_sizes)
         if isinstance(glimpse_sizes[0], float):
             glimpse_sizes = [int(np.ceil(image_size * sz)) for sz in glimpse_sizes]
@@ -79,8 +185,10 @@ class GlimpseSensor(nn.Module):
         self.padding = int((glimpse_sizes[-1] - 1) // 2)
         self.learn_kernels = learn_kernels
         self.a = a
+        self.pad_imgs = pad_imgs
         self.preserve_out_channels = preserve_out_channels
         self.init(a, in_channels, preserve_out_channels)
+        self.unrolled_glimpse_size = glimpse_sizes[0]**2 * self.out_channels
 
     '''
     Initializes a set of convolutional kernels to use during resizing. This uses
@@ -124,32 +232,29 @@ class GlimpseSensor(nn.Module):
                 Variable(
                     torch.from_numpy((k * out_channels)/(in_channels * k.sum()))
                         .expand(out_channels, in_channels, -1, -1)
-                        .type(torch.FloatTensor)
+                        .type(torch.FloatTensor),
+                    requires_grad = False
                 ) for k in kernels
             ]
-            # The first glimpse doesn't need resizing, hence `None`
             self.kernels = kernels
         else:
-            self.kernels = [  # Convolution kernels
+            self.kernels = nn.ModuleList([  # Convolution kernels
                 nn.init.xavier_normal(
                     Variable(torch.zeros((out_channels, in_channels, sz, sz)))
                 ) for sz in kernel_sizes
-            ]
+            ])
 
     '''
     Inputs:
     `imgs`: input tensor of size `(batch_size, channels, image_height, image_width)`
     `locs`: a list of 2-tuples representing the `(x_pos, y_pos)` for each image
         in the batch to center the extracted glimpses around
-    `pad_imgs`: whether or not the input images need padding applied. Defaults
-        to `True`, but set to `False` if the input images already have padding
-        applied; make sure it's of the correct size!
     '''
-    def forward(self, imgs, locs, pad_imgs = True):
+    def forward(self, imgs, locs):
         batch_size, channels, height, width = imgs.size()
         p = self.padding  # Convenience
         # Create a padded version of the images
-        if pad_imgs:
+        if self.pad_imgs:
             padded_imgs = Variable(torch.zeros(
                 batch_size, channels, width + 2*p, height + 2*p
             ))
