@@ -2,9 +2,13 @@
 Implements the Recurrent Attention Model (RAM), as described in "Recurrent
 Models of Visual Attention" (Mnih, et al.)
 '''
-
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
+
+from torch.autograd import Variable
 
 '''
 The RecurrentAttentionModel is overall an RNN. The core network of the model
@@ -39,5 +43,141 @@ extracts a retina-like representation `rho(x_t, loc_t1)`, centered at `loc_t1`,
 that contains multiple resolution patches.
 '''
 class GlimpseSensor(nn.Module):
-    def __init__(self):
+    '''
+    Inputs:
+    `image_size`: the size of the input image as an `int`. For now, assumes the
+        image is square.
+    `glimpse_sizes`: a list of either `int`s or `float`s representing the
+        (square) size of each glimpse to extract from the input image. The sizes
+        should be in increasing order, but this will still make sure they're
+        ordered correctly. The length of `glimpse_sizes` will also be the number
+        of glimpse patches to extract. If `glimpse_sizes` is a list of `int`s,
+        they'll be treated as exact sizes; if it's a list of `float`s, they'll
+        be treated as percentages of `image_size`, and should thus all be <= 1.
+        Padding will be added to the inputs to allow glimpses near the edges.
+        The actual sizes of the resulting glimpses will be the same size as the
+        first glimpse.
+    `learn_kernels`: if `True`, the kernels used to create the glimpses will
+        have learnable parameters. If `False` (the default), the glimpses will
+        be created using bicubic interpolation, and the kernels used will have
+        fixed weights
+    `a`: the scaling factor used for bicubic interpolation during resizing.
+    '''
+    def __init__(self, image_size, in_channels,
+                glimpse_sizes = [0.05, 0.1, 0.3, 0.6],
+                learn_kernels = False, a = -0.5, preserve_out_channels = False
+                ):
         super(GlimpseSensor, self).__init__()
+        glimpse_sizes.sort()
+
+        self.image_size = image_size
+        self.in_channels = in_channels
+        self.num_glimpses = len(glimpse_sizes)
+        if isinstance(glimpse_sizes[0], float):
+            glimpse_sizes = [int(np.ceil(image_size * sz)) for sz in glimpse_sizes]
+        self.glimpse_sizes = glimpse_sizes
+        self.padding = int((glimpse_sizes[-1] - 1) // 2)
+        self.learn_kernels = learn_kernels
+        self.a = a
+        self.preserve_out_channels = preserve_out_channels
+        self.init(a, in_channels, preserve_out_channels)
+
+    '''
+    Initializes a set of convolutional kernels to use during resizing. This uses
+    bicubic interpolation, so the kernel function is given as:
+
+            | (a+2)|x|^3 - (a+3)|x|^2 + 1       ; |x| <= 1
+    k(x) =  | a|x|^3 - 5a|x|^2 + 8a|x| - 4a     ; 1 < |x| < 2
+            | 0                                 ; otherwise
+
+    `a`: kernel coefficient used when calculating kernel weights
+    `in_channels`: number of channels in the input images (typically 1 for
+        grayscale, 3 for RGB, 4 for RGBa)
+    `preserve_out_channels`: if `True`, the number of out channels is kept in
+        each of the glimpses. If `False` (default), the number of out channels
+        in the glimpses is 1
+    '''
+    def init(self, a, in_channels = 3, preserve_out_channels = False):
+        g_sz = self.glimpse_sizes[0]
+        kernel_sizes = [
+            sz - g_sz + 1 for sz in self.glimpse_sizes
+        ]
+        out_channels = in_channels if preserve_out_channels else 1
+        if not self.learn_kernels:
+            self.a = a
+            # x-values to apply the filter function over
+            kernels = [
+                np.arange(-sz/2.+0.5, sz/2.+0.5)[..., np.newaxis]*4./sz
+                for sz in kernel_sizes
+            ]
+            # Kernel values in 1D
+            kernels = [np.apply_along_axis(lambda x:
+                [0.] if x > 2 else (
+                    a*x**3. - 5.*a*x**2. + 8.*a*x - 4.*a if x > 1 else
+                    (a+2.)*x**3. - (a+3.)*x**2. + 1.
+                ), 1, np.abs(k)
+            ) for k in kernels]
+            # Kernel values in 2D
+            kernels = [np.matmul(k, k.T) for k in kernels]
+            # Normalize and turn into torch tensors
+            kernels = [
+                Variable(
+                    torch.from_numpy((k * out_channels)/(in_channels * k.sum()))
+                        .expand(out_channels, in_channels, -1, -1)
+                        .type(torch.FloatTensor)
+                ) for k in kernels
+            ]
+            # The first glimpse doesn't need resizing, hence `None`
+            self.kernels = kernels
+        else:
+            self.kernels = [  # Convolution kernels
+                nn.init.xavier_normal(
+                    Variable(torch.zeros((out_channels, in_channels, sz, sz)))
+                ) for sz in kernel_sizes
+            ]
+
+    '''
+    Inputs:
+    `imgs`: input tensor of size `(batch_size, channels, image_height, image_width)`
+    `locs`: a list of 2-tuples representing the `(x_pos, y_pos)` for each image
+        in the batch to center the extracted glimpses around
+    `pad_imgs`: whether or not the input images need padding applied. Defaults
+        to `True`, but set to `False` if the input images already have padding
+        applied; make sure it's of the correct size!
+    '''
+    def forward(self, imgs, locs, pad_imgs = True):
+        batch_size, channels, height, width = imgs.size()
+        p = self.padding  # Convenience
+        # Create a padded version of the images
+        if pad_imgs:
+            padded_imgs = Variable(torch.zeros(
+                batch_size, channels, width + 2*p, height + 2*p
+            ))
+            padded_imgs[:, :, p:-p, p:-p] = imgs
+        else:
+            padded_imgs = imgs
+
+        # Extract glimpses from the padded images
+        unsized_glimpses = [
+            torch.cat([
+                padded_imgs[
+                    b, :, p+x-g//2:p+x+(g+1)//2, p+y-g//2:p+y+(g+1)//2
+                ].unsqueeze(0) for b, (x, y) in enumerate(locs)
+            ], 0) for g in self.glimpse_sizes
+        ]
+        # Resize the glimpses and concatenate over the channels dimension
+        glimpses = torch.cat(
+            [self.resize(g, k) for g, k in zip(unsized_glimpses, self.kernels)], 1
+        )
+        return unsized_glimpses, glimpses
+
+    '''
+    Performs 2D convolution on the input images. `kernel`s need to be either `None`
+    or a tensor of size `(out_channels, in_channels, kernel_height, kernel_width)`
+    '''
+    def resize(self, img, kernel = None):
+        if kernel is None:
+            return img
+        # Convolute the kernel over the image and return the downsampled glimpse
+        resized_img = F.conv2d(img, kernel)
+        return resized_img
