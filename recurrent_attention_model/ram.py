@@ -53,12 +53,13 @@ class RecurrentAttentionModel(nn.Module):
     `preserve_out_channels`: if `True`, the number of out channels is kept in
         each of the glimpses. If `False` (default), the number of out channels
         in the glimpses is 1
+    `dropout`: dropout drop probability
     '''
     def __init__(self, image_size, in_channels,
                 glimpse_h_size, loc_h_size, h_size,
                 glimpse_sizes = [0.05, 0.1, 0.3, 0.6],
                 pad_imgs = True, learn_kernels = False, a = -0.5,
-                preserve_out_channels = False):
+                preserve_out_channels = False, dropout = 0.1):
         super(RecurrentAttentionModel, self).__init__()
         self.image_size = image_size
         self.in_channels = in_channels
@@ -71,9 +72,9 @@ class RecurrentAttentionModel(nn.Module):
         self.glimpse_network = GlimpseNetwork(
             image_size = image_size, in_channels = in_channels,
             glimpse_h_size = glimpse_h_size, loc_h_size = loc_h_size,
-            h_size = h_size, glimpse_sizes = glimpse_sizes, pad_imgs = pad_imgs,
-            learn_kernels = learn_kernels, a = a,
-            preserve_out_channels = preserve_out_channels
+            h_size = h_size, glimpse_sizes = glimpse_sizes,
+            pad_imgs = pad_imgs, learn_kernels = learn_kernels, a = a,
+            preserve_out_channels = preserve_out_channels, dropout = dropout,
         )
 
 
@@ -264,13 +265,22 @@ class GlimpseSensor(nn.Module):
         each of the glimpses. If `False` (default), the number of out channels
         in the glimpses is 1
     '''
-    def init(self, a, in_channels = 3, preserve_out_channels = False):
+    def init(self, a = -0.5, in_channels = 3, preserve_out_channels = False):
         g_sz = self.glimpse_sizes[0]
         kernel_sizes = [
             sz - g_sz + 1 for sz in self.glimpse_sizes
         ]
         out_channels = in_channels if preserve_out_channels else 1
-        if not self.learn_kernels:
+        if self.learn_kernels:
+            self.kernels = nn.ModuleList([  # Convolution kernels
+                nn.Conv2d(in_channels, out_channels, sz) for sz in kernel_sizes
+            ])
+            for p in self.parameters():
+                if p.dim() > 1:
+                    nn.init.xavier_normal(p)
+                else:
+                    p.data.fill_(0)
+        else:
             self.a = a
             # x-values to apply the filter function over
             kernels = [
@@ -296,12 +306,6 @@ class GlimpseSensor(nn.Module):
                 ) for k in kernels
             ]
             self.kernels = kernels
-        else:
-            self.kernels = nn.ModuleList([  # Convolution kernels
-                nn.init.xavier_normal(
-                    Variable(torch.zeros((out_channels, in_channels, sz, sz)))
-                ) for sz in kernel_sizes
-            ])
 
     '''
     Inputs:
@@ -340,8 +344,9 @@ class GlimpseSensor(nn.Module):
     or a tensor of size `(out_channels, in_channels, kernel_height, kernel_width)`
     '''
     def resize(self, img, kernel = None):
-        if kernel is None:
-            return img
         # Convolute the kernel over the image and return the downsampled glimpse
-        resized_img = F.conv2d(img, kernel)
+        if self.learn_kernels:  # Kernel is actually a Conv2d layer
+            resized_img = kernel(img)
+        else:                   # Kernel is a tensor
+            resized_img = F.conv2d(img, kernel)
         return resized_img
