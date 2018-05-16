@@ -432,10 +432,8 @@ class GlimpseNetwork(nn.Module):
         ### Full network output
         # Concatenate the glimpse and location representations
         glimpse_net_in = torch.cat([glimpse_rep, loc_rep], -1)                  # (nbatches, glimpse_h_size + loc_h_size)
-
         # Pass through final linear layer
-        net_out = self.relu(self.drop(self.out_layer(glimpse_net_in))           # (nbatches, network_size)
-
+        net_out = self.relu(self.drop(self.out_layer(glimpse_net_in)))          # (nbatches, network_size)
         return net_out
         
 
