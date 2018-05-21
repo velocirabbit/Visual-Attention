@@ -1,4 +1,5 @@
-recurrent_attention_model/.ipynb_checkpoints/
-recurrent_attention_model/__pycache__/
-recurrent_attention_model/.ipynb_checkpoints/RAM MNIST test, fixed convolution kernels-checkpoint.ipynb
-recurrent_attention_model/__pycache__/ram.cpython-36.pyc
+/recurrent_attention_model/.ipynb_checkpoints/
+/recurrent_attention_model/__pycache__/
+/recurrent_attention_model/.ipynb_checkpoints/RAM MNIST test, fixed convolution kernels-checkpoint.ipynb
+/recurrent_attention_model/__pycache__/ram.cpython-36.pyc
+*.pyc
