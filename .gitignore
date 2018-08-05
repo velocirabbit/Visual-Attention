@@ -1,5 +1,10 @@
-/recurrent_attention_model/.ipynb_checkpoints/
-/recurrent_attention_model/__pycache__/
-/recurrent_attention_model/.ipynb_checkpoints/RAM MNIST test, fixed convolution kernels-checkpoint.ipynb
-/recurrent_attention_model/__pycache__/ram.cpython-36.pyc
+recurrent_attention_model/.ipynb_checkpoints/
+recurrent_attention_model/_ignore_/
+recurrent_attention_model/__pycache__/
+recurrent_attention_model/.ipynb_checkpoints/RAM MNIST test, fixed convolution kernels-checkpoint.ipynb
+recurrent_attention_model/__pycache__/ram.cpython-36.pyc
 *.pyc
+recurrent_attention_model/ram_old.py
+recurrent_attention_model/old_ram.py
+recurrent_attention_model/(old) RAM MNIST test, starting point at origin, no transforms, no error penalty, unsmoothed predictions.ipynb
+
