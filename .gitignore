@@ -8,3 +8,4 @@ recurrent_attention_model/ram_old.py
 recurrent_attention_model/old_ram.py
 recurrent_attention_model/(old) RAM MNIST test, starting point at origin, no transforms, no error penalty, unsmoothed predictions.ipynb
 
+*.pyc
